@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Automatic Link Opener</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 50px;
+      background: #f0f0f0;
+    }
+    button {
+      padding: 15px 30px;
+      font-size: 1.2em;
+      cursor: pointer;
+    }
+    #status {
+      margin-top: 30px;
+      font-size: 1.5em;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>Automatic Link Opener</h1>
+  <p>Click the button to start the sequence:</p>
+  <button id="startBtn">Start</button>
+  <div id="status"></div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const statusEl = document.getElementById('status');
+
+    startBtn.addEventListener('click', () => {
+      startBtn.disabled = true;
+      statusEl.textContent = "Step 1: Opening Task Page...";
+      
+      // Step 1: Open task.php
+      window.open('https://streamfiles.eu.org/task.php', '_blank');
+
+      // Step 2: After 20 seconds, open verify.php
+      setTimeout(() => {
+        statusEl.textContent = "Step 2: Opening Verify Page...";
+        window.open('https://streamfiles.eu.org/verify.php', '_blank');
+      }, 20000); // 20 seconds
+
+      // Step 3: After 20 + 14 = 34 seconds total, open task.php again
+      setTimeout(() => {
+        statusEl.textContent = "Step 3: Opening Task Page Again...";
+        window.open('https://streamfiles.eu.org/task.php', '_blank');
+        statusEl.textContent += " ✅ Sequence complete!";
+      }, 34000); // 34 seconds
+    });
+  </script>
+</body>
+</html>
