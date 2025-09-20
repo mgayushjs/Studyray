@@ -1,58 +1,158 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Automatic Link Opener</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      text-align: center;
-      padding: 50px;
-      background: #f0f0f0;
-    }
-    button {
-      padding: 15px 30px;
-      font-size: 1.2em;
-      cursor: pointer;
-    }
-    #status {
-      margin-top: 30px;
-      font-size: 1.5em;
-      color: #333;
-    }
-  </style>
-</head>
-<body>
-  <h1>Automatic Link Opener</h1>
-  <p>Click the button to start the sequence:</p>
-  <button id="startBtn">Start</button>
-  <div id="status"></div>
+# bot_solve_key.py
+# Requirements:
+#   pip install python-telegram-bot==20.4 playwright
+#   playwright install
+#
+# Usage:
+#   export TELEGRAM_TOKEN="YOUR_BOT_TOKEN"
+#   python bot_solve_key.py
+#
+# Note: Do not use this to bypass CAPTCHAs or against site TOS.
 
-  <script>
-    const startBtn = document.getElementById('startBtn');
-    const statusEl = document.getElementById('status');
+import os
+import re
+import logging
+from urllib.parse import urlparse, parse_qs
 
-    startBtn.addEventListener('click', () => {
-      startBtn.disabled = true;
-      statusEl.textContent = "Step 1: Opening Task Page...";
-      
-      // Step 1: Open task.php
-      window.open('https://streamfiles.eu.org/task.php', '_blank');
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-      // Step 2: After 20 seconds, open verify.php
-      setTimeout(() => {
-        statusEl.textContent = "Step 2: Opening Verify Page...";
-        window.open('https://streamfiles.eu.org/verify.php', '_blank');
-      }, 20000); // 20 seconds
+# Playwright sync API
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
-      // Step 3: After 20 + 14 = 34 seconds total, open task.php again
-      setTimeout(() => {
-        statusEl.textContent = "Step 3: Opening Task Page Again...";
-        window.open('https://streamfiles.eu.org/task.php', '_blank');
-        statusEl.textContent += " ✅ Sequence complete!";
-      }, 34000); // 34 seconds
-    });
-  </script>
-</body>
-</html>
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "<PUT_YOUR_TOKEN_HERE>")
+
+# Config
+GENERATE_URL = "https://studyable.io/studyrays/generate.php"
+# Optionally you can set a different target domain prefix if needed:
+TARGET_DOMAIN = "streamfiles.eu.org"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def extract_key_from_url(url: str):
+    """Extract value after key= from a url, return None if not found."""
+    try:
+        qs = parse_qs(urlparse(url).query)
+        if "key" in qs and qs["key"]:
+            return qs["key"][0]
+    except Exception:
+        pass
+    return None
+
+def extract_key_from_text(text: str):
+    """Try to find key=VALUE pattern in text."""
+    m = re.search(r"key=([A-Za-z0-9\-_]+)", text)
+    if m:
+        return m.group(1)
+    # try common HTML patterns
+    m2 = re.search(r'id="?key"?\s*[:=]\s*["\']?([A-Za-z0-9\-_]+)', text, re.IGNORECASE)
+    if m2:
+        return m2.group(1)
+    return None
+
+def solve_and_get_key(timeout_ms: int = 30000):
+    """
+    Opens GENERATE_URL, follows navigation until we find a URL containing ?key=... or page contains key.
+    Returns (key_str, final_url) or (None, last_url) on failure.
+    """
+    logger.info("Starting Playwright browser")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        last_url = GENERATE_URL
+        try:
+            logger.info("Navigating to generate url: %s", GENERATE_URL)
+            response = page.goto(GENERATE_URL, timeout=timeout_ms, wait_until="domcontentloaded")
+            # Give some time for JS redirects / dynamic actions to happen:
+            # We'll attempt to wait for network idle / navigation; but also poll.
+            # Maximum wait loops:
+            for attempt in range(12):  # total wait up to ~12 * 2s = 24s (plus initial)
+                # check current URL for key param
+                current_url = page.url or last_url
+                logger.info("Attempt %d: current_url=%s", attempt+1, current_url)
+                key = extract_key_from_url(current_url)
+                if key:
+                    logger.info("Found key in URL: %s", key)
+                    return key, current_url
+                # check page content for key
+                try:
+                    content = page.content()
+                except PWTimeoutError:
+                    content = ""
+                key2 = extract_key_from_text(content)
+                if key2:
+                    logger.info("Found key in page content: %s", key2)
+                    return key2, current_url
+                # attempt to click any continue/verify buttons if present (best-effort)
+                # look for common button texts
+                for sel_text in ["Continue", "Proceed", "Verify", "Click here", "Start"]:
+                    try:
+                        btn = page.query_selector(f"button:has-text('{sel_text}')")
+                        if not btn:
+                            btn = page.query_selector(f"a:has-text('{sel_text}')")
+                        if btn:
+                            logger.info("Clicking button/link with text: %s", sel_text)
+                            btn.click(timeout=4000)
+                            page.wait_for_load_state(timeout=5000)
+                    except Exception:
+                        pass
+                # wait a bit and loop
+                try:
+                    page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+            # final attempt: if no key found, but page redirected to target domain somewhere in hrefs
+            links = page.query_selector_all("a")
+            for a in links:
+                try:
+                    href = a.get_attribute("href")
+                    if href and TARGET_DOMAIN in href:
+                        k = extract_key_from_url(href) or extract_key_from_text(href)
+                        if k:
+                            return k, href
+                except Exception:
+                    continue
+            last_url = page.url
+        except Exception as e:
+            logger.exception("Error during Playwright navigation: %s", e)
+            last_url = page.url if page else GENERATE_URL
+        finally:
+            try:
+                context.close()
+                browser.close()
+            except Exception:
+                pass
+    logger.info("Key not found. Last URL: %s", last_url)
+    return None, last_url
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Send /solve to attempt solving the generator and retrieve the key (value after key=)." 
+    )
+
+async def solve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("Working on it... (headless browser running)")
+    try:
+        key, url = solve_and_get_key()
+        if key:
+            await msg.edit_text(f"Found key: `{key}`\n(from: {url})", parse_mode="Markdown")
+        else:
+            await msg.edit_text(f"Unable to find key automatically. Last URL: {url}")
+    except Exception as e:
+        logger.exception("Unhandled error in solve_cmd")
+        await msg.edit_text(f"Error while solving: {e}")
+
+def main():
+    if TELEGRAM_TOKEN.startswith("<PUT") or not TELEGRAM_TOKEN:
+        print("Please set TELEGRAM_TOKEN environment variable or edit TELEGRAM_TOKEN in the script.")
+        return
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("solve", solve_cmd))
+    print("Bot started. Send /solve to run the solver.")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
